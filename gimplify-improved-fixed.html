@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gimplify — Face Mask Photo Tool</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+  * { box-sizing: border-box; }
+
+  :root {
+    --bg: #0b0b0c;
+    --panel: #151517;
+    --panel-2: #1c1c1f;
+    --border: #2d2d31;
+    --text: #f5f5f7;
+    --muted: #9a9aa2;
+    --accent: #e0374f;
+    --accent-2: #ff536a;
+    --success: #8fd3a3;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at 50% -10%, #242429 0%, var(--bg) 42%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 28px 16px 44px;
+  }
+
+  .app {
+    width: min(100%, 760px);
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+
+  .brand {
+    margin: 0;
+    font-size: clamp(25px, 6vw, 34px);
+    line-height: 1;
+    font-weight: 750;
+    letter-spacing: -0.04em;
+  }
+
+  .tagline {
+    margin: 9px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .controls {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+
+  button, .file-btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 17px;
+    min-height: 46px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--panel-2);
+    cursor: pointer;
+    transition: transform .15s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:hover, .file-btn:hover {
+    background: #242428;
+    border-color: #414147;
+  }
+
+  button:active, .file-btn:active {
+    transform: scale(.98);
+  }
+
+  button:disabled {
+    opacity: .38;
+    cursor: default;
+    transform: none;
+  }
+
+  .primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 8px 28px rgba(224,55,79,.18);
+  }
+
+  .primary:hover {
+    background: var(--accent-2);
+    border-color: var(--accent-2);
+  }
+
+  .file-btn {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .file-btn input[type=file] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  #photoControls,
+  #resultControls {
+    display: none;
+  }
+
+  #status {
+    min-height: 22px;
+    margin: 0 0 12px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  #status.success {
+    color: var(--success);
+  }
+
+  #canvasWrap {
+    width: 100%;
+    min-height: 320px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+    background: #111113;
+    box-shadow: 0 18px 55px rgba(0,0,0,.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  #placeholder {
+    width: 100%;
+    padding: 72px 24px;
+    text-align: center;
+    color: var(--muted);
+  }
+
+  .drop-icon {
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 17px;
+    border: 1px solid #36363b;
+    border-radius: 16px;
+    display: grid;
+    place-items: center;
+    font-size: 25px;
+    background: #18181b;
+  }
+
+  .placeholder-title {
+    color: var(--text);
+    font-size: 17px;
+    font-weight: 650;
+    margin-bottom: 6px;
+  }
+
+  .placeholder-subtitle {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .hint {
+    margin-top: 18px;
+    font-size: 11px;
+    color: #68686f;
+  }
+
+  /* Adjustment drawer */
+  #adjustPanel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(20,20,22,.98);
+    border-top: 1px solid var(--border);
+    border-radius: 20px 20px 0 0;
+    padding: 18px 20px calc(20px + env(safe-area-inset-bottom));
+    z-index: 2000;
+    display: none;
+    box-shadow: 0 -18px 50px rgba(0,0,0,.45);
+    backdrop-filter: blur(18px);
+  }
+
+  #adjustPanel.open { display: block; }
+
+  .adjust-inner {
+    width: min(100%, 720px);
+    margin: 0 auto;
+  }
+
+  .adjust-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 18px;
+  }
+
+  #adjustPanel h3 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+  }
+
+  .adjust-help {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .adjRow {
+    display: grid;
+    grid-template-columns: 78px 1fr 52px;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .adjRow label {
+    font-size: 13px;
+    color: #c9c9ce;
+  }
+
+  .adjRow input[type=range] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .adjRow span {
+    text-align: right;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .adjButtons {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 18px;
+  }
+
+  .adjButtons .right {
+    display: flex;
+    gap: 8px;
+  }
+
+  #adjSaveBtn {
+    display: none;
+  }
+
+  #adjSaveStatus {
+    font-size: 11px !important;
+    color: var(--success) !important;
+    text-align: right;
+    height: 16px;
+    margin-top: 5px;
+  }
+
+  /* Live camera */
+  #liveView {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  #liveCanvas {
+    width: 100%;
+    max-width: 100%;
+    max-height: 100vh;
+    object-fit: contain;
+  }
+
+  .live-topbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: max(18px, env(safe-area-inset-top)) 18px 18px;
+    display: flex;
+    justify-content: flex-end;
+    z-index: 2;
+    background: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+  }
+
+  #closeLiveBtn {
+    width: 42px;
+    min-height: 42px;
+    padding: 0;
+    border-radius: 50%;
+    background: rgba(20,20,20,.7);
+    border-color: rgba(255,255,255,.18);
+    font-size: 20px;
+  }
+
+  #liveStatus {
+    position: absolute;
+    top: max(72px, calc(env(safe-area-inset-top) + 55px));
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: #ddd;
+    font-size: 13px;
+    z-index: 2;
+    text-shadow: 0 1px 4px #000;
+  }
+
+  #liveControls {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 20px 22px max(26px, env(safe-area-inset-bottom));
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 22px;
+    z-index: 2;
+    background: linear-gradient(transparent, rgba(0,0,0,.7));
+  }
+
+  #liveControls button {
+    border-radius: 50%;
+    width: 52px;
+    min-height: 52px;
+    padding: 0;
+    background: rgba(30,30,30,.75);
+    border-color: rgba(255,255,255,.2);
+  }
+
+  #captureBtn {
+    width: 72px !important;
+    min-height: 72px !important;
+    background: #fff !important;
+    border: 6px solid rgba(255,255,255,.45) !important;
+    color: #111 !important;
+    font-size: 0 !important;
+    box-shadow: 0 4px 22px rgba(0,0,0,.35);
+  }
+
+  #captureBtn::after {
+    content: "";
+    width: 50px;
+    height: 50px;
+    display: block;
+    margin: 0 auto;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  #flipBtn { font-size: 18px; }
+  #closeLiveBtn { font-size: 14px; }
+
+  @media (max-width: 560px) {
+    body { padding: 22px 12px 30px; }
+    .controls { gap: 8px; }
+    button, .file-btn { padding: 11px 13px; }
+    #canvasWrap { border-radius: 14px; min-height: 280px; }
+    .adjRow { grid-template-columns: 72px 1fr 48px; }
+  }
+</style>
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <h1 class="brand">🎭 Gimplify</h1>
+      <p class="tagline">Turn any face into the mask.</p>
+    </header>
+
+    <div class="controls" id="startControls">
+      <label class="file-btn primary" for="fileInput">
+        Choose Photo
+        <input type="file" id="fileInput" accept="image/*">
+      </label>
+      <button id="liveCameraBtn">Use Camera</button>
+    </div>
+
+    <div class="controls" id="photoControls">
+      <button id="adjustToggleBtn">⚙️ Adjust Fit</button>
+      <button id="retakeBtn">↩ New Photo</button>
+      <button id="downloadBtn" disabled class="primary">Download PNG</button>
+    </div>
+
+    <div id="status"></div>
+
+    <div id="canvasWrap">
+      <div id="placeholder">
+        <div class="drop-icon">＋</div>
+        <div class="placeholder-title">Drop a photo here</div>
+        <div class="placeholder-subtitle">or choose a photo from your device<br>and Gimplify the faces inside it.</div>
+        <div class="hint">Best results with clear, front-facing faces</div>
+      </div>
+      <canvas id="canvas" style="display:none;"></canvas>
+    </div>
+  </main>
+
+  <img id="maskImg" src="mask.png" style="display:none;" crossorigin="anonymous">
+
+  <!-- Fit adjustment panel -->
+  <div id="adjustPanel">
+    <div class="adjust-inner">
+      <div class="adjust-header">
+        <h3>Adjust Mask</h3>
+        <span class="adjust-help">Fine-tune the fit</span>
+      </div>
+
+      <div class="adjRow">
+        <label>Width</label>
+        <input type="range" id="adjWidth" min="70" max="130" value="100">
+        <span id="adjWidthVal">100%</span>
+      </div>
+
+      <div class="adjRow">
+        <label>Height</label>
+        <input type="range" id="adjHeight" min="70" max="130" value="100">
+        <span id="adjHeightVal">100%</span>
+      </div>
+
+      <div class="adjRow">
+        <label>Position</label>
+        <input type="range" id="adjX" min="-80" max="80" value="0">
+        <span id="adjXVal">0px</span>
+      </div>
+
+      <div class="adjRow">
+        <label>Vertical</label>
+        <input type="range" id="adjY" min="-80" max="80" value="0">
+        <span id="adjYVal">0px</span>
+      </div>
+
+      <div class="adjRow">
+        <label>Rotation</label>
+        <input type="range" id="adjRot" min="-15" max="15" value="0" step="0.5">
+        <span id="adjRotVal">0°</span>
+      </div>
+
+      <div class="adjButtons">
+        <button id="adjResetBtn">Reset</button>
+        <div class="right">
+          <button id="adjSaveBtn">Save as Default</button>
+          <button id="adjCloseBtn" class="primary">Done</button>
+        </div>
+      </div>
+      <div id="adjSaveStatus"></div>
+    </div>
+  </div>
+
+  <!-- Live camera view -->
+  <div id="liveView">
+    <div class="live-topbar">
+      <button id="closeLiveBtn" aria-label="Close camera">×</button>
+    </div>
+    <div id="liveStatus">Looking for a face…</div>
+    <video id="video" style="display:none;" playsinline></video>
+    <canvas id="liveCanvas"></canvas>
+    <div id="liveControls">
+      <button id="flipBtn" aria-label="Flip camera" title="Flip camera">↻</button>
+      <button id="captureBtn" aria-label="Capture photo" title="Capture photo">Capture</button>
+      <div style="width:52px;height:52px;"></div>
+    </div>
+  </div>
+
+<script>
+    // ---- Two-layer rendering ----
+    // Layer 1: the whole mask image gets one reliable affine stretch
+    // (rotation + independent x/y scale, anchored at the eyes) covering
+    // the hood, hair, and forehead area. A single triangle can only ever
+    // be pointed, never a rounded dome, so mesh-warping that region with
+    // only 2-3 points produced a "witch hat" peak instead of proper
+    // coverage — a plain stretch looks better there since there's no
+    // reliable dense landmark data for hair/forehead anyway.
+    // Layer 2: a per-point mesh warp for the eyes/nose/mouth/jaw/chin,
+    // drawn on top, where MediaPipe's landmarks are dense and reliable
+    // enough to genuinely contour to the face.
+    const MASK_W = 700, MASK_H = 876; // must match assets/mask.png
+    const FOREHEAD_REF = { mask: [350, 20], lm: 10 };
+    const LANDMARK_POINTS = [
+      { name: 'eyeOuterL',  mask: [150, 335], lm: 33  },
+      { name: 'eyeInnerL',  mask: [285, 340], lm: 133 },
+      { name: 'eyeOuterR',  mask: [555, 330], lm: 263 },
+      { name: 'eyeInnerR',  mask: [415, 340], lm: 362 },
+      { name: 'noseBridge', mask: [350, 260], lm: 168 },
+      { name: 'noseTip',    mask: [350, 440], lm: 1   },
+      { name: 'noseAlaL',   mask: [300, 460], lm: 98  },
+      { name: 'noseAlaR',   mask: [400, 460], lm: 327 },
+      { name: 'mouthL',     mask: [215, 505], lm: 61  },
+      { name: 'mouthR',     mask: [480, 505], lm: 291 },
+      { name: 'jawL',       mask: [140, 580], lm: 172 },
+      { name: 'jawR',       mask: [560, 580], lm: 397 },
+      { name: 'chin',       mask: [350, 800], lm: 152 },
+    ];
+    // Points beyond what MediaPipe can see (cheek sides, neck). Extrapolated
+    // each frame from the same similarity transform used for Layer 1, so
+    // there's no seam between the two layers.
+    const BOUNDARY_POINTS = [
+      { name: 'hoodLeft',     mask: [30, 300]  },
+      { name: 'hoodRight',    mask: [670, 300] },
+      { name: 'hoodBottomL',  mask: [170, 860] },
+      { name: 'hoodBottomR',  mask: [530, 860] },
+      { name: 'hoodBottomC',  mask: [350, 876] },
+    ];
+    const ALL_POINTS = [...LANDMARK_POINTS, ...BOUNDARY_POINTS];
+    const IDX = {};
+    ALL_POINTS.forEach((p, i) => { IDX[p.name] = i; });
+
+    // Hand-authored triangle mesh (indices into ALL_POINTS) — deliberately
+    // only covers eyes/nose/mouth/jaw/chin plus a bit of outer cheek; the
+    // forehead/hairline/hood-top area is left to Layer 1's affine stretch.
+    const TRI_NAMES = [
+      ['hoodLeft','eyeOuterL','noseAlaL'], ['hoodLeft','noseAlaL','hoodBottomL'],
+      ['hoodRight','noseAlaR','eyeOuterR'], ['hoodRight','hoodBottomR','noseAlaR'],
+
+      ['jawL','chin','jawR'],
+      ['hoodBottomL','jawL','chin'], ['hoodBottomR','chin','jawR'],
+      ['hoodBottomL','chin','hoodBottomC'], ['hoodBottomC','chin','hoodBottomR'],
+
+      ['eyeInnerL','noseBridge','eyeInnerR'], ['eyeInnerL','eyeInnerR','noseTip'],
+      ['eyeInnerL','noseTip','noseAlaL'], ['eyeInnerR','noseAlaR','noseTip'],
+      ['eyeOuterL','eyeInnerL','noseAlaL'], ['eyeOuterR','noseAlaR','eyeInnerR'],
+      ['eyeOuterL','noseAlaL','mouthL'], ['eyeOuterR','mouthR','noseAlaR'],
+      ['noseAlaL','noseTip','noseAlaR'], ['noseAlaL','mouthL','noseAlaR'],
+      ['mouthL','mouthR','noseAlaR'],
+      ['mouthL','chin','mouthR'], ['mouthL','jawL','chin'], ['mouthR','chin','jawR'],
+    ];
+    const TRIANGLES = TRI_NAMES.map(([a,b,c]) => [IDX[a], IDX[b], IDX[c]]);
+    const ANCHOR_IDX = IDX['eyeOuterL'];
+    const MASK_EYE_DIST = Math.hypot(
+      ALL_POINTS[IDX['eyeOuterR']].mask[0] - ALL_POINTS[IDX['eyeOuterL']].mask[0],
+      ALL_POINTS[IDX['eyeOuterR']].mask[1] - ALL_POINTS[IDX['eyeOuterL']].mask[1]
+    );
+    const MASK_FACE_HEIGHT = Math.hypot(
+      ALL_POINTS[IDX['chin']].mask[0] - FOREHEAD_REF.mask[0],
+      ALL_POINTS[IDX['chin']].mask[1] - FOREHEAD_REF.mask[1]
+    );
+
+    const fileInput = document.getElementById('fileInput');
+    const liveCameraBtn = document.getElementById('liveCameraBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statusEl = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+    const placeholder = document.getElementById('placeholder');
+    const maskImg = document.getElementById('maskImg');
+    const ctx = canvas.getContext('2d');
+    const startControls = document.getElementById('startControls');
+    const photoControls = document.getElementById('photoControls');
+    const retakeBtn = document.getElementById('retakeBtn');
+    // Explicitly expose the file picker as a fallback for browsers with
+    // restrictive label/input behavior.
+    document.querySelector('.file-btn').addEventListener('click', (e) => {
+      if (e.target === fileInput) return;
+      fileInput.click();
+    });
+
+
+    function showPhotoUI() {
+      startControls.style.display = 'none';
+      photoControls.style.display = 'flex';
+    }
+
+    function showStartUI() {
+      startControls.style.display = 'flex';
+      photoControls.style.display = 'none';
+      adjustPanel.classList.remove('open');
+    }
+
+    function setStatus(message, success = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle('success', success);
+    }
+
+    retakeBtn.addEventListener('click', () => {
+      mode = 'idle';
+      currentImage = null;
+      lastPhoto = null;
+      canvas.style.display = 'none';
+      placeholder.style.display = 'block';
+      downloadBtn.disabled = true;
+      setStatus('');
+      fileInput.value = '';
+      showStartUI();
+    });
+
+
+    const liveView = document.getElementById('liveView');
+    const liveStatus = document.getElementById('liveStatus');
+    const video = document.getElementById('video');
+    const liveCanvas = document.getElementById('liveCanvas');
+    const liveCtx = liveCanvas.getContext('2d');
+    const flipBtn = document.getElementById('flipBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const closeLiveBtn = document.getElementById('closeLiveBtn');
+
+    let currentImage = null;   // still-photo mode source
+    let mpCamera = null;       // MediaPipe Camera helper (drives the render loop)
+    let mediaStream = null;
+    let facingMode = 'user';   // front camera by default, like a selfie filter
+    let mode = 'idle';         // 'photo' | 'live'
+    let lastPhoto = null;      // { source, w, h, faces } — cached so sliders
+                                // can re-render a still photo without re-running
+                                // face detection every time a slider moves.
+
+    // User-adjustable fit correction, applied on top of the computed
+    // transform in drawMasked(). Multipliers/offsets, not raw values, so
+    // they compose cleanly with per-face detection results.
+    const adjust = { scaleXMul: 1, scaleYMul: 1, offsetX: 0, offsetY: 0, rotDeg: 0 };
+    const FIT_STORAGE_KEY = 'gimplify_fit_defaults';
+
+    const adjustPanel = document.getElementById('adjustPanel');
+    const adjustToggleBtn = document.getElementById('adjustToggleBtn');
+    const adjCloseBtn = document.getElementById('adjCloseBtn');
+    const adjResetBtn = document.getElementById('adjResetBtn');
+    const adjSaveBtn = document.getElementById('adjSaveBtn');
+    const adjSaveStatus = document.getElementById('adjSaveStatus');
+    const sliders = {
+      adjWidth:  { key: 'scaleXMul', fmt: v => `${v}%`,  toAdjust: v => v / 100, fromAdjust: v => Math.round(v * 100) },
+      adjHeight: { key: 'scaleYMul', fmt: v => `${v}%`,  toAdjust: v => v / 100, fromAdjust: v => Math.round(v * 100) },
+      adjX:      { key: 'offsetX',   fmt: v => `${v}px`, toAdjust: v => Number(v), fromAdjust: v => v },
+      adjY:      { key: 'offsetY',   fmt: v => `${v}px`, toAdjust: v => Number(v), fromAdjust: v => v },
+      adjRot:    { key: 'rotDeg',    fmt: v => `${v}°`,  toAdjust: v => Number(v), fromAdjust: v => v },
+    };
+
+    // Apply a set of slider values (matching `sliders`' keys) to both the
+    // DOM inputs and the live `adjust` object — used for loading saved
+    // defaults and for Reset.
+    function applySliderValues(values) {
+      Object.entries(sliders).forEach(([id, cfg]) => {
+        const raw = values[cfg.key];
+        const displayVal = cfg.fromAdjust(raw);
+        document.getElementById(id).value = displayVal;
+        document.getElementById(id + 'Val').textContent = cfg.fmt(displayVal);
+        adjust[cfg.key] = raw;
+      });
+    }
+
+    // Load a saved default fit, if one exists, before anything renders.
+    try {
+      const saved = JSON.parse(localStorage.getItem(FIT_STORAGE_KEY));
+      if (saved) applySliderValues(saved);
+    } catch (e) { /* corrupt or missing — just use the built-in defaults */ }
+
+    function rerenderPhoto() {
+      if (mode !== 'photo' || !lastPhoto) return;
+      drawMasked(ctx, canvas, lastPhoto.source, lastPhoto.w, lastPhoto.h, lastPhoto.faces);
+      setStatus(lastPhoto.faces.length
+        ? `${lastPhoto.faces.length} face${lastPhoto.faces.length === 1 ? '' : 's'} masked`
+        : 'No faces detected — try a clearer, front-facing photo');
+      downloadBtn.disabled = lastPhoto.faces.length === 0;
+    }
+
+    Object.entries(sliders).forEach(([id, cfg]) => {
+      const input = document.getElementById(id);
+      const label = document.getElementById(id + 'Val');
+      input.addEventListener('input', () => {
+        label.textContent = cfg.fmt(input.value);
+        adjust[cfg.key] = cfg.toAdjust(input.value);
+        rerenderPhoto(); // no-op in live mode — the render loop already reads `adjust` every frame
+      });
+    });
+
+    adjustToggleBtn.addEventListener('click', () => adjustPanel.classList.toggle('open'));
+    adjCloseBtn.addEventListener('click', () => adjustPanel.classList.remove('open'));
+    adjResetBtn.addEventListener('click', () => {
+      applySliderValues({ scaleXMul: 1, scaleYMul: 1, offsetX: 0, offsetY: 0, rotDeg: 0 });
+      rerenderPhoto();
+    });
+    adjSaveBtn.addEventListener('click', () => {
+      try {
+        localStorage.setItem(FIT_STORAGE_KEY, JSON.stringify(adjust));
+        adjSaveStatus.textContent = 'Saved — used automatically next visit (this device only)';
+      } catch (e) {
+        adjSaveStatus.textContent = 'Could not save (storage unavailable)';
+      }
+      setTimeout(() => { adjSaveStatus.textContent = ''; }, 3000);
+    });
+
+    // Solves the 3-point affine transform mapping triangle (x0,y0)(x1,y1)(x2,y2)
+    // onto (X0,Y0)(X1,Y1)(X2,Y2), clips to the destination triangle, and
+    // draws the mask image through that transform. Standard technique for
+    // warping an image over a triangle mesh using only the 2D canvas API.
+    function drawWarpedTriangle(targetCtx, img, src, dst) {
+      const [x0, y0] = src[0], [x1, y1] = src[1], [x2, y2] = src[2];
+      const [X0, Y0] = dst[0], [X1, Y1] = dst[1], [X2, Y2] = dst[2];
+
+      const denom = x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1);
+      if (Math.abs(denom) < 1e-6) return; // degenerate triangle, skip
+
+      const a = (X0 * (y1 - y2) + X1 * (y2 - y0) + X2 * (y0 - y1)) / denom;
+      const b = (Y0 * (y1 - y2) + Y1 * (y2 - y0) + Y2 * (y0 - y1)) / denom;
+      const c = (X0 * (x2 - x1) + X1 * (x0 - x2) + X2 * (x1 - x0)) / denom;
+      const d = (Y0 * (x2 - x1) + Y1 * (x0 - x2) + Y2 * (x1 - x0)) / denom;
+      const e = (X0 * (x1*y2 - x2*y1) + X1 * (x2*y0 - x0*y2) + X2 * (x0*y1 - x1*y0)) / denom;
+      const f = (Y0 * (x1*y2 - x2*y1) + Y1 * (x2*y0 - x0*y2) + Y2 * (x0*y1 - x1*y0)) / denom;
+
+      targetCtx.save();
+      targetCtx.beginPath();
+      targetCtx.moveTo(X0, Y0);
+      targetCtx.lineTo(X1, Y1);
+      targetCtx.lineTo(X2, Y2);
+      targetCtx.closePath();
+      targetCtx.clip();
+      targetCtx.setTransform(a, b, c, d, e, f);
+      targetCtx.drawImage(img, 0, 0);
+      targetCtx.restore();
+    }
+
+    function drawMasked(targetCtx, targetCanvas, source, sourceW, sourceH, faces) {
+      targetCanvas.width = sourceW;
+      targetCanvas.height = sourceH;
+      targetCtx.setTransform(1, 0, 0, 1, 0, 0);
+      targetCtx.clearRect(0, 0, sourceW, sourceH);
+      targetCtx.drawImage(source, 0, 0, sourceW, sourceH);
+
+      for (const landmarks of faces) {
+        // Real landmark-driven points, in face-pixel space.
+        const facePts = LANDMARK_POINTS.map(p => [
+          landmarks[p.lm].x * sourceW,
+          landmarks[p.lm].y * sourceH,
+        ]);
+
+        const eyeOuterL = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterL')];
+        const eyeOuterR = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterR')];
+        const chin      = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'chin')];
+        const foreheadRefPt = [
+          landmarks[FOREHEAD_REF.lm].x * sourceW,
+          landmarks[FOREHEAD_REF.lm].y * sourceH,
+        ];
+
+        // Similarity transform (rotation + independent x/y scale), anchored
+        // at eyeOuterL, with the user's manual fit correction layered on
+        // top. Drives both Layer 1 (whole-image stretch) and the
+        // extrapolated boundary points used by Layer 2.
+        const dxEye = eyeOuterR[0] - eyeOuterL[0], dyEye = eyeOuterR[1] - eyeOuterL[1];
+        const theta = Math.atan2(dyEye, dxEye) + adjust.rotDeg * Math.PI / 180;
+        const scaleX = (Math.hypot(dxEye, dyEye) / MASK_EYE_DIST) * adjust.scaleXMul;
+        const scaleY = (Math.hypot(chin[0]-foreheadRefPt[0], chin[1]-foreheadRefPt[1]) / MASK_FACE_HEIGHT) * adjust.scaleYMul;
+        const cos = Math.cos(theta), sin = Math.sin(theta);
+        const [anchorMx, anchorMy] = ALL_POINTS[ANCHOR_IDX].mask;
+        const anchorFx = eyeOuterL[0] + adjust.offsetX;
+        const anchorFy = eyeOuterL[1] + adjust.offsetY;
+
+        // ---- Layer 1: whole-mask affine stretch (hood, hair, forehead) ----
+        targetCtx.save();
+        targetCtx.translate(anchorFx, anchorFy);
+        targetCtx.rotate(theta);
+        targetCtx.scale(scaleX, scaleY);
+        targetCtx.translate(-anchorMx, -anchorMy);
+        targetCtx.drawImage(maskImg, 0, 0, MASK_W, MASK_H);
+        targetCtx.restore();
+
+        // ---- Layer 2: precise mesh warp for eyes/nose/mouth/jaw/chin ----
+        const boundaryPts = BOUNDARY_POINTS.map(p => {
+          const dx = (p.mask[0] - anchorMx) * scaleX;
+          const dy = (p.mask[1] - anchorMy) * scaleY;
+          return [
+            anchorFx + dx * cos - dy * sin,
+            anchorFy + dx * sin + dy * cos,
+          ];
+        });
+        const allFacePts = [...facePts, ...boundaryPts];
+
+        for (const [i0, i1, i2] of TRIANGLES) {
+          drawWarpedTriangle(
+            targetCtx, maskImg,
+            [ALL_POINTS[i0].mask, ALL_POINTS[i1].mask, ALL_POINTS[i2].mask],
+            [allFacePts[i0], allFacePts[i1], allFacePts[i2]]
+          );
+        }
+      }
+    }
+
+    // ---------- Still photo mode ----------
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 6,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    faceMesh.onResults((results) => {
+      if (mode !== 'photo') return; // ignore stray callbacks from live mode
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      const faces = results.multiFaceLandmarks || [];
+      lastPhoto = { source: currentImage, w: currentImage.naturalWidth, h: currentImage.naturalHeight, faces };
+      drawMasked(ctx, canvas, lastPhoto.source, lastPhoto.w, lastPhoto.h, faces);
+      setStatus(faces.length
+        ? `${faces.length} face${faces.length === 1 ? '' : 's'} masked`
+        : 'No faces detected — try a clearer, front-facing photo');
+      downloadBtn.disabled = faces.length === 0;
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      mode = 'photo';
+      showPhotoUI();
+      setStatus('Finding faces…');
+      downloadBtn.disabled = true;
+      placeholder.style.display = 'block';
+      canvas.style.display = 'none';
+
+      const img = new Image();
+
+      img.onload = () => {
+        currentImage = img;
+        faceMesh.send({ image: img });
+      };
+
+      img.onerror = () => {
+        setStatus('Could not open that photo. Please try another image.');
+        showStartUI();
+      };
+
+      img.src = URL.createObjectURL(file);
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'masked-photo.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    // ---------- Live camera mode ----------
+    // A second FaceMesh instance so live tracking and still-photo detection
+    // never interfere with each other's in-flight results.
+    const liveFaceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    liveFaceMesh.setOptions({
+      maxNumFaces: 4,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    liveFaceMesh.onResults((results) => {
+      const faces = results.multiFaceLandmarks || [];
+      drawMasked(liveCtx, liveCanvas, video, video.videoWidth, video.videoHeight, faces);
+      liveStatus.textContent = faces.length ? '' : 'Looking for a face…';
+    });
+
+    async function startLiveCamera() {
+      mode = 'live';
+      liveView.style.display = 'flex';
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode },
+          audio: false,
+        });
+      } catch (err) {
+        liveStatus.textContent = 'Camera access denied or unavailable.';
+        return;
+      }
+      video.srcObject = mediaStream;
+      await video.play();
+
+      if (mpCamera) mpCamera.stop();
+      mpCamera = new Camera(video, {
+        onFrame: async () => { await liveFaceMesh.send({ image: video }); },
+        width: 640,
+        height: 480,
+      });
+      mpCamera.start();
+    }
+
+    function stopLiveCamera() {
+      if (mpCamera) { mpCamera.stop(); mpCamera = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      liveView.style.display = 'none';
+      mode = 'idle';
+    }
+
+    liveCameraBtn.addEventListener('click', startLiveCamera);
+    closeLiveBtn.addEventListener('click', stopLiveCamera);
+
+    flipBtn.addEventListener('click', () => {
+      facingMode = facingMode === 'user' ? 'environment' : 'user';
+      startLiveCamera(); // restart the stream with the new facing mode
+    });
+
+    captureBtn.addEventListener('click', () => {
+      // Freeze the current live frame (already composited with the mask)
+      // into the main canvas, then drop back to the normal photo view so
+      // the existing Download button works on it unchanged.
+      canvas.width = liveCanvas.width;
+      canvas.height = liveCanvas.height;
+      ctx.drawImage(liveCanvas, 0, 0);
+      stopLiveCamera();
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      setStatus('Your Gimplified photo is ready.', true);
+      downloadBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>
