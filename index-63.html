@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gimplify</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #0e0e0e;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 60px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 20px;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 18px;
+  }
+  button, .file-btn {
+    background: #2a2a2a;
+    color: #fff;
+    border: 1px solid #444;
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; }
+  .file-btn { position: relative; overflow: hidden; }
+  .file-btn input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer;
+  }
+  #status {
+    min-height: 20px;
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  #canvasWrap {
+    max-width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #1a1a1a;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+  #placeholder {
+    color: #666;
+    font-size: 14px;
+    padding: 80px 20px;
+    text-align: center;
+  }
+
+  /* Live camera overlay */
+  #liveView {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  #liveCanvas {
+    max-width: 100%;
+    max-height: 80vh;
+    border-radius: 0;
+  }
+  #liveControls {
+    position: absolute;
+    bottom: 30px;
+    display: flex;
+    gap: 14px;
+  }
+  #liveControls button {
+    padding: 14px 22px;
+    font-size: 15px;
+    border-radius: 30px;
+  }
+  #captureBtn { background: #e0374f; border-color: #e0374f; }
+  #liveStatus {
+    position: absolute;
+    top: 20px;
+    color: #ccc;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+  <h1>🎭 Gimplify</h1>
+
+  <div class="controls">
+    <label class="file-btn">
+      Choose Photo
+      <input type="file" id="fileInput" accept="image/*">
+    </label>
+    <button id="liveCameraBtn">Use Camera</button>
+    <button id="downloadBtn" disabled>Download</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="canvasWrap">
+    <div id="placeholder">Pick a photo or use the camera to get started</div>
+    <canvas id="canvas" style="display:none;"></canvas>
+  </div>
+
+  <img id="maskImg" src="mask.png" style="display:none;" crossorigin="anonymous">
+
+  <!-- Live camera view -->
+  <div id="liveView">
+    <div id="liveStatus">Looking for a face…</div>
+    <video id="video" style="display:none;" playsinline></video>
+    <canvas id="liveCanvas"></canvas>
+    <div id="liveControls">
+      <button id="flipBtn">Flip Camera</button>
+      <button id="captureBtn">📸 Capture</button>
+      <button id="closeLiveBtn">Close</button>
+    </div>
+  </div>
+
+  <script>
+    // Anchor points measured directly on assets/mask.png (700x876).
+    // If you swap in a different mask image, re-measure the eye-hole
+    // centers on the new image and update these two points.
+    const MASK_ANCHORS = {
+      leftEye:  { x: 221.7, y: 346.6 },
+      rightEye: { x: 499.6, y: 343.4 },
+    };
+    const MASK_EYE_DIST = MASK_ANCHORS.rightEye.x - MASK_ANCHORS.leftEye.x;
+
+    const fileInput = document.getElementById('fileInput');
+    const liveCameraBtn = document.getElementById('liveCameraBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statusEl = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+    const placeholder = document.getElementById('placeholder');
+    const maskImg = document.getElementById('maskImg');
+    const ctx = canvas.getContext('2d');
+
+    const liveView = document.getElementById('liveView');
+    const liveStatus = document.getElementById('liveStatus');
+    const video = document.getElementById('video');
+    const liveCanvas = document.getElementById('liveCanvas');
+    const liveCtx = liveCanvas.getContext('2d');
+    const flipBtn = document.getElementById('flipBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const closeLiveBtn = document.getElementById('closeLiveBtn');
+
+    let currentImage = null;   // still-photo mode source
+    let mpCamera = null;       // MediaPipe Camera helper (drives the render loop)
+    let mediaStream = null;
+    let facingMode = 'user';   // front camera by default, like a selfie filter
+    let mode = 'idle';         // 'photo' | 'live'
+
+    function avg(landmarks, indices) {
+      let x = 0, y = 0;
+      for (const i of indices) { x += landmarks[i].x; y += landmarks[i].y; }
+      return { x: x / indices.length, y: y / indices.length };
+    }
+
+    // Draws `source` (an <img> or a <video> frame) onto `targetCtx`, then
+    // overlays the mask on every detected face. Shared by both photo mode
+    // and live camera mode so the alignment logic only lives in one place.
+    function drawMasked(targetCtx, targetCanvas, source, sourceW, sourceH, faces) {
+      targetCanvas.width = sourceW;
+      targetCanvas.height = sourceH;
+      targetCtx.clearRect(0, 0, sourceW, sourceH);
+      targetCtx.drawImage(source, 0, 0, sourceW, sourceH);
+
+      for (const landmarks of faces) {
+        const leftEyeLm = landmarks[468] || avg(landmarks, [33, 133]);
+        const rightEyeLm = landmarks[473] || avg(landmarks, [362, 263]);
+
+        const lx = leftEyeLm.x * sourceW;
+        const ly = leftEyeLm.y * sourceH;
+        const rx = rightEyeLm.x * sourceW;
+        const ry = rightEyeLm.y * sourceH;
+
+        const dx = rx - lx, dy = ry - ly;
+        const faceEyeDist = Math.sqrt(dx * dx + dy * dy);
+        const rotation = Math.atan2(dy, dx);
+        const scale = faceEyeDist / MASK_EYE_DIST;
+
+        targetCtx.save();
+        targetCtx.translate(lx, ly);
+        targetCtx.rotate(rotation);
+        targetCtx.scale(scale, scale);
+        targetCtx.translate(-MASK_ANCHORS.leftEye.x, -MASK_ANCHORS.leftEye.y);
+        targetCtx.drawImage(maskImg, 0, 0);
+        targetCtx.restore();
+      }
+    }
+
+    // ---------- Still photo mode ----------
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 6,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    faceMesh.onResults((results) => {
+      if (mode !== 'photo') return; // ignore stray callbacks from live mode
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      const faces = results.multiFaceLandmarks || [];
+      drawMasked(ctx, canvas, currentImage, currentImage.naturalWidth, currentImage.naturalHeight, faces);
+      statusEl.textContent = faces.length
+        ? `${faces.length} face${faces.length === 1 ? '' : 's'} masked`
+        : 'No faces detected — try a clearer, front-facing photo';
+      downloadBtn.disabled = faces.length === 0;
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      mode = 'photo';
+      statusEl.textContent = 'Detecting faces…';
+      downloadBtn.disabled = true;
+      const img = new Image();
+      img.onload = () => {
+        currentImage = img;
+        faceMesh.send({ image: img });
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'masked-photo.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    // ---------- Live camera mode ----------
+    // A second FaceMesh instance so live tracking and still-photo detection
+    // never interfere with each other's in-flight results.
+    const liveFaceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    liveFaceMesh.setOptions({
+      maxNumFaces: 4,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    liveFaceMesh.onResults((results) => {
+      const faces = results.multiFaceLandmarks || [];
+      drawMasked(liveCtx, liveCanvas, video, video.videoWidth, video.videoHeight, faces);
+      liveStatus.textContent = faces.length ? '' : 'Looking for a face…';
+    });
+
+    async function startLiveCamera() {
+      mode = 'live';
+      liveView.style.display = 'flex';
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode },
+          audio: false,
+        });
+      } catch (err) {
+        liveStatus.textContent = 'Camera access denied or unavailable.';
+        return;
+      }
+      video.srcObject = mediaStream;
+      await video.play();
+
+      if (mpCamera) mpCamera.stop();
+      mpCamera = new Camera(video, {
+        onFrame: async () => { await liveFaceMesh.send({ image: video }); },
+        width: 640,
+        height: 480,
+      });
+      mpCamera.start();
+    }
+
+    function stopLiveCamera() {
+      if (mpCamera) { mpCamera.stop(); mpCamera = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      liveView.style.display = 'none';
+      mode = 'idle';
+    }
+
+    liveCameraBtn.addEventListener('click', startLiveCamera);
+    closeLiveBtn.addEventListener('click', stopLiveCamera);
+
+    flipBtn.addEventListener('click', () => {
+      facingMode = facingMode === 'user' ? 'environment' : 'user';
+      startLiveCamera(); // restart the stream with the new facing mode
+    });
+
+    captureBtn.addEventListener('click', () => {
+      // Freeze the current live frame (already composited with the mask)
+      // into the main canvas, then drop back to the normal photo view so
+      // the existing Download button works on it unchanged.
+      canvas.width = liveCanvas.width;
+      canvas.height = liveCanvas.height;
+      ctx.drawImage(liveCanvas, 0, 0);
+      stopLiveCamera();
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      statusEl.textContent = 'Captured — ready to download';
+      downloadBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>
