@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gimplify</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #0e0e0e;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 60px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 20px;
+  }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 18px;
+  }
+  button, .file-btn {
+    background: #2a2a2a;
+    color: #fff;
+    border: 1px solid #444;
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; }
+  .file-btn { position: relative; overflow: hidden; }
+  .file-btn input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer;
+  }
+  #status {
+    min-height: 20px;
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  #canvasWrap {
+    max-width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #1a1a1a;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+  #placeholder {
+    color: #666;
+    font-size: 14px;
+    padding: 80px 20px;
+    text-align: center;
+  }
+
+  /* Live camera overlay */
+  #liveView {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  #liveCanvas {
+    max-width: 100%;
+    max-height: 80vh;
+    border-radius: 0;
+  }
+  #liveControls {
+    position: absolute;
+    bottom: 30px;
+    display: flex;
+    gap: 14px;
+  }
+  #liveControls button {
+    padding: 14px 22px;
+    font-size: 15px;
+    border-radius: 30px;
+  }
+  #captureBtn { background: #e0374f; border-color: #e0374f; }
+  #liveStatus {
+    position: absolute;
+    top: 20px;
+    color: #ccc;
+    font-size: 13px;
+  }
+
+  /* Fit adjustment panel — overlays both normal and live views */
+  #adjustPanel {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.97);
+    border-top: 1px solid #444;
+    padding: 16px 20px 24px;
+    z-index: 2000;
+    display: none;
+  }
+  #adjustPanel.open { display: block; }
+  #adjustPanel h3 {
+    margin: 0 0 12px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #ccc;
+  }
+  .adjRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .adjRow label {
+    width: 78px;
+    font-size: 13px;
+    color: #bbb;
+    flex-shrink: 0;
+  }
+  .adjRow input[type=range] {
+    flex: 1;
+  }
+  .adjRow span {
+    width: 46px;
+    text-align: right;
+    font-size: 12px;
+    color: #999;
+    flex-shrink: 0;
+  }
+  #adjustPanel .adjButtons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+  <h1>🎭 Gimplify</h1>
+
+  <div class="controls">
+    <label class="file-btn">
+      Choose Photo
+      <input type="file" id="fileInput" accept="image/*">
+    </label>
+    <button id="liveCameraBtn">Use Camera</button>
+    <button id="adjustToggleBtn">⚙️ Adjust Fit</button>
+    <button id="downloadBtn" disabled>Download</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="canvasWrap">
+    <div id="placeholder">Pick a photo or use the camera to get started</div>
+    <canvas id="canvas" style="display:none;"></canvas>
+  </div>
+
+  <img id="maskImg" src="mask.png" style="display:none;" crossorigin="anonymous">
+
+  <!-- Fit adjustment panel -->
+  <div id="adjustPanel">
+    <h3>Adjust Fit</h3>
+    <div class="adjRow">
+      <label>Width</label>
+      <input type="range" id="adjWidth" min="50" max="170" value="100">
+      <span id="adjWidthVal">100%</span>
+    </div>
+    <div class="adjRow">
+      <label>Height</label>
+      <input type="range" id="adjHeight" min="50" max="170" value="100">
+      <span id="adjHeightVal">100%</span>
+    </div>
+    <div class="adjRow">
+      <label>Left/Right</label>
+      <input type="range" id="adjX" min="-150" max="150" value="0">
+      <span id="adjXVal">0px</span>
+    </div>
+    <div class="adjRow">
+      <label>Up/Down</label>
+      <input type="range" id="adjY" min="-150" max="150" value="0">
+      <span id="adjYVal">0px</span>
+    </div>
+    <div class="adjRow">
+      <label>Rotate</label>
+      <input type="range" id="adjRot" min="-15" max="15" value="0" step="0.5">
+      <span id="adjRotVal">0°</span>
+    </div>
+    <div class="adjRow" style="grid-template-columns: 1fr auto;">
+      <label for="adjHairToggle">Tuck stray hair</label>
+      <input type="checkbox" id="adjHairToggle" checked style="width:auto; justify-self:end;">
+    </div>
+    <div class="adjButtons">
+      <button id="adjSaveBtn">💾 Save as Default</button>
+      <button id="adjResetBtn">Reset</button>
+      <button id="adjCloseBtn">Done</button>
+    </div>
+    <div id="adjSaveStatus" style="font-size:12px;color:#8c8;text-align:right;height:16px;"></div>
+  </div>
+
+  <!-- Live camera view -->
+  <div id="liveView">
+    <div id="liveStatus">Looking for a face…</div>
+    <video id="video" style="display:none;" playsinline></video>
+    <canvas id="liveCanvas"></canvas>
+    <div id="liveControls">
+      <button id="flipBtn">Flip Camera</button>
+      <button id="captureBtn">📸 Capture</button>
+      <button id="closeLiveBtn">Close</button>
+    </div>
+  </div>
+
+  <script>
+    // ---- Two-layer rendering ----
+    // Layer 1: the whole mask image gets one reliable affine stretch
+    // (rotation + independent x/y scale, anchored at the eyes) covering
+    // the hood, hair, and forehead area. A single triangle can only ever
+    // be pointed, never a rounded dome, so mesh-warping that region with
+    // only 2-3 points produced a "witch hat" peak instead of proper
+    // coverage — a plain stretch looks better there since there's no
+    // reliable dense landmark data for hair/forehead anyway.
+    // Layer 2: a per-point mesh warp for the eyes/nose/mouth/jaw/chin,
+    // drawn on top, where MediaPipe's landmarks are dense and reliable
+    // enough to genuinely contour to the face.
+    const MASK_W = 700, MASK_H = 876; // must match assets/mask.png
+    const FOREHEAD_REF = { mask: [350, 20], lm: 10 };
+    const LANDMARK_POINTS = [
+      { name: 'eyeOuterL',  mask: [163, 335], lm: 33  },
+      { name: 'eyeInnerL',  mask: [297, 328], lm: 133 },
+      { name: 'eyeOuterR',  mask: [560, 327], lm: 263 },
+      { name: 'eyeInnerR',  mask: [428, 328], lm: 362 },
+      { name: 'noseBridge', mask: [350, 278], lm: 168 },
+      { name: 'noseTip',    mask: [350, 462], lm: 1   },
+      { name: 'noseAlaL',   mask: [305, 425], lm: 98  },
+      { name: 'noseAlaR',   mask: [395, 425], lm: 327 },
+      { name: 'mouthL',     mask: [286, 534], lm: 61  },
+      { name: 'mouthR',     mask: [451, 529], lm: 291 },
+      { name: 'jawL',       mask: [155, 610], lm: 172 },
+      { name: 'jawR',       mask: [545, 610], lm: 397 },
+      { name: 'chin',       mask: [350, 830], lm: 152 },
+      // Eye loop points — derived at runtime from the corner landmarks
+      // above, not their own MediaPipe landmarks. See EYE_LOOP_PARAMS below.
+      { name: 'eyeL_c', mask: [221.7, 337.4] },
+      { name: 'eyeL_0', mask: [285.1, 336.9] }, { name: 'eyeL_1', mask: [259.1, 352.0] },
+      { name: 'eyeL_2', mask: [244.9, 359.2] }, { name: 'eyeL_3', mask: [233.5, 363.2] },
+      { name: 'eyeL_4', mask: [222.6, 365.4] }, { name: 'eyeL_5', mask: [211.0, 365.1] },
+      { name: 'eyeL_6', mask: [196.1, 363.4] }, { name: 'eyeL_7', mask: [177.8, 355.5] },
+      { name: 'eyeL_8', mask: [162.6, 336.9] }, { name: 'eyeL_9', mask: [178.3, 318.5] },
+      { name: 'eyeL_10', mask: [197.5, 311.8] }, { name: 'eyeL_11', mask: [212.1, 311.5] },
+      { name: 'eyeL_12', mask: [222.6, 311.9] }, { name: 'eyeL_13', mask: [232.6, 312.9] },
+      { name: 'eyeL_14', mask: [244.9, 314.6] }, { name: 'eyeL_15', mask: [266.1, 318.9] },
+      { name: 'eyeR_c', mask: [501.3, 336.1] },
+      { name: 'eyeR_0', mask: [559.2, 335.5] }, { name: 'eyeR_1', mask: [541.8, 352.5] },
+      { name: 'eyeR_2', mask: [525.5, 360.2] }, { name: 'eyeR_3', mask: [512.2, 363.2] },
+      { name: 'eyeR_4', mask: [500.7, 363.5] }, { name: 'eyeR_5', mask: [489.6, 362.3] },
+      { name: 'eyeR_6', mask: [477.7, 358.4] }, { name: 'eyeR_7', mask: [461.9, 351.5] },
+      { name: 'eyeR_8', mask: [434.7, 335.5] }, { name: 'eyeR_9', mask: [460.5, 318.8] },
+      { name: 'eyeR_10', mask: [479.9, 314.6] }, { name: 'eyeR_11', mask: [491.3, 312.8] },
+      { name: 'eyeR_12', mask: [500.7, 312.0] }, { name: 'eyeR_13', mask: [511.0, 310.5] },
+      { name: 'eyeR_14', mask: [525.5, 310.7] }, { name: 'eyeR_15', mask: [548.8, 315.6] },
+    ];
+    // Points beyond what MediaPipe can see (cheek sides, neck). Extrapolated
+    // each frame from the same similarity transform used for Layer 1, so
+    // there's no seam between the two layers.
+    const BOUNDARY_POINTS = [
+      { name: 'hoodLeft',     mask: [115, 335] },
+      { name: 'hoodRight',    mask: [597, 335] },
+      { name: 'hoodBottomL',  mask: [280, 850] },
+      { name: 'hoodBottomR',  mask: [436, 850] },
+      { name: 'hoodBottomC',  mask: [360, 865] },
+    ];
+    const ALL_POINTS = [...LANDMARK_POINTS, ...BOUNDARY_POINTS];
+    const IDX = {};
+    ALL_POINTS.forEach((p, i) => { IDX[p.name] = i; });
+
+    // Eye holes are traced as a smooth 16-point loop per eye (plus a center
+    // point for a fan fill), all DERIVED from the stable outer/inner corner
+    // landmarks — never from individual eyelid landmarks. Two reasons:
+    // (1) eyelid landmarks jitter with gaze/blink and caused the earlier
+    // droopy/sharp-artifact bug when they landed slightly off; (2) a
+    // polygon needs enough points to read as a smooth curve rather than a
+    // faceted kite shape — 4 points (as before) was never going to look
+    // fully smooth no matter how well-placed. Each point's (u,v) was
+    // measured once by radially sampling the actual eye-hole boundary in
+    // mask.png at 16 evenly-spaced angles — this is real traced geometry,
+    // not an approximated ellipse.
+    const EYE_LOOP_PARAMS = {
+      L: {
+        center: [0.4358, 0.0403],
+        loop: [
+          [0.908,0.0616],[0.7086,0.1639],[0.6001,0.2119],[0.5137,0.2373],
+          [0.4317,0.2494],[0.3455,0.2427],[0.2353,0.2242],[0.1022,0.1583],
+          [-0.0037,0.014],[0.1203,-0.1169],[0.2658,-0.1593],[0.3746,-0.1558],
+          [0.4525,-0.1487],[0.5266,-0.1374],[0.6175,-0.12],[0.7736,-0.0797],
+        ],
+      },
+      R: {
+        center: [0.4451, -0.0656],
+        loop: [
+          [0.0065,-0.0643],[0.1393,-0.1921],[0.2633,-0.2495],[0.3642,-0.2715],
+          [0.4513,-0.2731],[0.5353,-0.2634],[0.6253,-0.2331],[0.7445,-0.18],
+          [0.9497,-0.0572],[0.7533,0.0678],[0.6061,0.0985],[0.5196,0.1115],
+          [0.4484,0.117],[0.3702,0.1278],[0.2604,0.1255],[0.0842,0.087],
+        ],
+      },
+    };
+    // Bridge points into the surrounding face mesh reuse specific loop
+    // indices for the outer/inner/top/bottom roles. These differ between
+    // eyes — the radial sampling started at a fixed absolute angle (not
+    // relative to each eye's own orientation), so which index lands near
+    // which anatomical corner isn't symmetric between L and R. Verified
+    // programmatically against the measured points, not assumed.
+    const EYE_BRIDGE_IDX = {
+      L: { outer: 8, inner: 0, top: 11, bottom: 4 },
+      R: { outer: 0, inner: 8, top: 13, bottom: 4 },
+    };
+
+    // Hand-authored triangle mesh (indices into ALL_POINTS) — deliberately
+    // only covers eyes/nose/mouth/jaw/chin plus a bit of outer cheek; the
+    // forehead/hairline/hood-top area is left to Layer 1's affine stretch.
+    // The zipper is NOT covered here — see ZIPPER_POINTS below, drawn as
+    // its own dedicated quad so it can't get fragmented across triangles.
+    const eyeFan = (side) => {
+      const names = [];
+      for (let i = 0; i < 16; i++) {
+        names.push([`eye${side}_c`, `eye${side}_${i}`, `eye${side}_${(i+1)%16}`]);
+      }
+      return names;
+    };
+    const b = EYE_BRIDGE_IDX;
+    const TRI_NAMES = [
+      ...eyeFan('L'), ...eyeFan('R'),
+
+      ['hoodLeft',`eyeL_${b.L.outer}`,`eyeL_${b.L.top}`], ['hoodRight',`eyeR_${b.R.top}`,`eyeR_${b.R.outer}`],
+      [`eyeL_${b.L.top}`,'noseBridge',`eyeL_${b.L.inner}`], [`eyeR_${b.R.top}`,`eyeR_${b.R.inner}`,'noseBridge'],
+      [`eyeL_${b.L.bottom}`,'noseAlaL',`eyeL_${b.L.inner}`], [`eyeR_${b.R.bottom}`,`eyeR_${b.R.inner}`,'noseAlaR'],
+      ['hoodLeft',`eyeL_${b.L.outer}`,`eyeL_${b.L.bottom}`], ['hoodRight',`eyeR_${b.R.outer}`,`eyeR_${b.R.bottom}`],
+      ['hoodLeft',`eyeL_${b.L.bottom}`,'noseAlaL'], ['hoodRight','noseAlaR',`eyeR_${b.R.bottom}`],
+      ['hoodLeft','noseAlaL','hoodBottomL'], ['hoodRight','hoodBottomR','noseAlaR'],
+
+      ['jawL','chin','jawR'],
+      ['hoodBottomL','jawL','chin'], ['hoodBottomR','chin','jawR'],
+      ['hoodBottomL','chin','hoodBottomC'], ['hoodBottomC','chin','hoodBottomR'],
+
+      [`eyeL_${b.L.inner}`,'noseBridge',`eyeR_${b.R.inner}`], [`eyeL_${b.L.inner}`,`eyeR_${b.R.inner}`,'noseTip'],
+      [`eyeL_${b.L.inner}`,'noseTip','noseAlaL'], [`eyeR_${b.R.inner}`,'noseAlaR','noseTip'],
+      ['noseAlaL','noseTip','noseAlaR'], ['noseAlaL','mouthL','noseAlaR'],
+      ['mouthL','mouthR','noseAlaR'],
+      ['mouthL','chin','mouthR'], ['mouthL','jawL','chin'], ['mouthR','chin','jawR'],
+    ];
+    const TRIANGLES = TRI_NAMES.map(([a,b,c]) => [IDX[a], IDX[b], IDX[c]]);
+
+    // The zipper is small, straight, and precise — exactly the kind of
+    // feature that looks wrong if fragmented across independently-warped
+    // triangles (which is what caused it to look duplicated/kinked). It
+    // isn't tied to any real landmark (there's no "zipper" on an actual
+    // face), so its 4 corners are positioned each frame via bilinear
+    // interpolation across the mouthL/mouthR/jawL/jawR quad — keeping it
+    // attached naturally to the mouth/jaw while always rendering as one
+    // coherent, undistorted quad instead of 3 separately-warped slivers.
+    const ZIPPER_POINTS = {
+      topL: [190, 588], topR: [495, 578], bottomL: [190, 617], bottomR: [495, 608],
+    };
+
+    const ANCHOR_IDX = IDX['eyeOuterL'];
+    const MASK_EYE_DIST = Math.hypot(
+      ALL_POINTS[IDX['eyeOuterR']].mask[0] - ALL_POINTS[IDX['eyeOuterL']].mask[0],
+      ALL_POINTS[IDX['eyeOuterR']].mask[1] - ALL_POINTS[IDX['eyeOuterL']].mask[1]
+    );
+    const MASK_FACE_HEIGHT = Math.hypot(
+      ALL_POINTS[IDX['chin']].mask[0] - FOREHEAD_REF.mask[0],
+      ALL_POINTS[IDX['chin']].mask[1] - FOREHEAD_REF.mask[1]
+    );
+    // The pixel measurements above were eyeballed on a grid overlay and
+    // checked against assumed (not measured) facial proportions — there's
+    // no way to verify them against real MediaPipe output outside a
+    // browser. That's the likely source of a systematic undersizing that
+    // no amount of slider adjustment could fully compensate for. These two
+    // constants add a deliberate safety margin to the baseline hood/hair
+    // coverage (Layer 1 only — they don't affect the precise eye/nose/
+    // mouth/jaw/chin mesh, which is always anchored to real landmarks
+    // regardless of these values). Raise them further if 100% still isn't
+    // quite enough; the Width/Height sliders now have more headroom too.
+    const HOOD_MARGIN_X = 1.15;
+    const HOOD_MARGIN_Y = 1.30;
+
+    const fileInput = document.getElementById('fileInput');
+    const liveCameraBtn = document.getElementById('liveCameraBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statusEl = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+    const placeholder = document.getElementById('placeholder');
+    const maskImg = document.getElementById('maskImg');
+    const ctx = canvas.getContext('2d');
+
+    const liveView = document.getElementById('liveView');
+    const liveStatus = document.getElementById('liveStatus');
+    const video = document.getElementById('video');
+    const liveCanvas = document.getElementById('liveCanvas');
+    const liveCtx = liveCanvas.getContext('2d');
+    const flipBtn = document.getElementById('flipBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const closeLiveBtn = document.getElementById('closeLiveBtn');
+
+    let currentImage = null;   // still-photo mode source
+    let mpCamera = null;       // MediaPipe Camera helper (drives the render loop)
+    let mediaStream = null;
+    let facingMode = 'user';   // front camera by default, like a selfie filter
+    let mode = 'idle';         // 'photo' | 'live'
+    let lastPhoto = null;      // { source, w, h, faces } — cached so sliders
+                                // can re-render a still photo without re-running
+                                // face detection every time a slider moves.
+
+    // User-adjustable fit correction, applied on top of the computed
+    // transform in drawMasked(). Multipliers/offsets, not raw values, so
+    // they compose cleanly with per-face detection results.
+    const adjust = { scaleXMul: 1, scaleYMul: 1, offsetX: 0, offsetY: 0, rotDeg: 0 };
+    let hairTuckEnabled = true;
+    const HAIR_HALO_MARGIN = 1.16;  // how far the blurred halo extends past the crisp mask edge
+    const HAIR_HALO_BLUR = 16;      // px, at the mask's native 700x876 resolution
+    const HAIR_HALO_OPACITY = 0.55; // semi-transparent — a fully opaque halo darkens real
+                                     // background (not just hair) for anyone with short/tight
+                                     // hair, or wherever the halo margin exceeds actual hair extent
+
+    // A pure-black silhouette of maskImg (same alpha shape, solid black
+    // fill) — built once and cached, not per-frame. Since the real photo's
+    // "eye holes" are just dark pixels rather than true alpha cutouts, the
+    // alpha channel alone traces exactly the mask's outer boundary with no
+    // facial detail baked in, which is exactly what a soft edge-halo needs.
+    let silhouetteCanvas = null;
+    function getSilhouette() {
+      if (silhouetteCanvas) return silhouetteCanvas;
+      silhouetteCanvas = document.createElement('canvas');
+      silhouetteCanvas.width = MASK_W;
+      silhouetteCanvas.height = MASK_H;
+      const sctx = silhouetteCanvas.getContext('2d');
+      sctx.drawImage(maskImg, 0, 0, MASK_W, MASK_H);
+      sctx.globalCompositeOperation = 'source-in';
+      sctx.fillStyle = '#000';
+      sctx.fillRect(0, 0, MASK_W, MASK_H);
+      return silhouetteCanvas;
+    }
+    const FIT_STORAGE_KEY = 'gimplify_fit_defaults';
+
+    const adjustPanel = document.getElementById('adjustPanel');
+    const adjustToggleBtn = document.getElementById('adjustToggleBtn');
+    const adjCloseBtn = document.getElementById('adjCloseBtn');
+    const adjResetBtn = document.getElementById('adjResetBtn');
+    const adjSaveBtn = document.getElementById('adjSaveBtn');
+    const adjSaveStatus = document.getElementById('adjSaveStatus');
+    const sliders = {
+      adjWidth:  { key: 'scaleXMul', fmt: v => `${v}%`,  toAdjust: v => v / 100, fromAdjust: v => Math.round(v * 100) },
+      adjHeight: { key: 'scaleYMul', fmt: v => `${v}%`,  toAdjust: v => v / 100, fromAdjust: v => Math.round(v * 100) },
+      adjX:      { key: 'offsetX',   fmt: v => `${v}px`, toAdjust: v => Number(v), fromAdjust: v => v },
+      adjY:      { key: 'offsetY',   fmt: v => `${v}px`, toAdjust: v => Number(v), fromAdjust: v => v },
+      adjRot:    { key: 'rotDeg',    fmt: v => `${v}°`,  toAdjust: v => Number(v), fromAdjust: v => v },
+    };
+
+    // Apply a set of slider values (matching `sliders`' keys) to both the
+    // DOM inputs and the live `adjust` object — used for loading saved
+    // defaults and for Reset.
+    function applySliderValues(values) {
+      Object.entries(sliders).forEach(([id, cfg]) => {
+        const raw = values[cfg.key];
+        const displayVal = cfg.fromAdjust(raw);
+        document.getElementById(id).value = displayVal;
+        document.getElementById(id + 'Val').textContent = cfg.fmt(displayVal);
+        adjust[cfg.key] = raw;
+      });
+    }
+
+    // Load a saved default fit, if one exists, before anything renders.
+    try {
+      const saved = JSON.parse(localStorage.getItem(FIT_STORAGE_KEY));
+      if (saved) {
+        applySliderValues(saved);
+        if (typeof saved.hairTuckEnabled === 'boolean') {
+          hairTuckEnabled = saved.hairTuckEnabled;
+          document.getElementById('adjHairToggle').checked = hairTuckEnabled;
+        }
+      }
+    } catch (e) { /* corrupt or missing — just use the built-in defaults */ }
+
+    function rerenderPhoto() {
+      if (mode !== 'photo' || !lastPhoto) return;
+      drawMasked(ctx, canvas, lastPhoto.source, lastPhoto.w, lastPhoto.h, lastPhoto.faces);
+      statusEl.textContent = lastPhoto.faces.length
+        ? `${lastPhoto.faces.length} face${lastPhoto.faces.length === 1 ? '' : 's'} masked`
+        : 'No faces detected — try a clearer, front-facing photo';
+      downloadBtn.disabled = lastPhoto.faces.length === 0;
+    }
+
+    Object.entries(sliders).forEach(([id, cfg]) => {
+      const input = document.getElementById(id);
+      const label = document.getElementById(id + 'Val');
+      input.addEventListener('input', () => {
+        label.textContent = cfg.fmt(input.value);
+        adjust[cfg.key] = cfg.toAdjust(input.value);
+        rerenderPhoto(); // no-op in live mode — the render loop already reads `adjust` every frame
+      });
+    });
+
+    adjustToggleBtn.addEventListener('click', () => adjustPanel.classList.toggle('open'));
+    adjCloseBtn.addEventListener('click', () => adjustPanel.classList.remove('open'));
+
+    const adjHairToggle = document.getElementById('adjHairToggle');
+    adjHairToggle.addEventListener('change', () => {
+      hairTuckEnabled = adjHairToggle.checked;
+      rerenderPhoto();
+    });
+    adjResetBtn.addEventListener('click', () => {
+      applySliderValues({ scaleXMul: 1, scaleYMul: 1, offsetX: 0, offsetY: 0, rotDeg: 0 });
+      rerenderPhoto();
+    });
+    adjSaveBtn.addEventListener('click', () => {
+      try {
+        localStorage.setItem(FIT_STORAGE_KEY, JSON.stringify({ ...adjust, hairTuckEnabled }));
+        adjSaveStatus.textContent = 'Saved — used automatically next visit (this device only)';
+      } catch (e) {
+        adjSaveStatus.textContent = 'Could not save (storage unavailable)';
+      }
+      setTimeout(() => { adjSaveStatus.textContent = ''; }, 3000);
+    });
+
+    // Solves the 3-point affine transform mapping triangle (x0,y0)(x1,y1)(x2,y2)
+    // onto (X0,Y0)(X1,Y1)(X2,Y2), clips to the destination triangle, and
+    // draws the mask image through that transform. Standard technique for
+    // warping an image over a triangle mesh using only the 2D canvas API.
+    // Reused every call instead of creating a new canvas per face per frame
+    // — avoids canvas-allocation overhead during live video.
+    const scratchCanvas = document.createElement('canvas');
+    const scratchCtx = scratchCanvas.getContext('2d');
+
+    const lerp1 = (a, b, t) => a + (b - a) * t;
+    const lerpPt = (p, q, t) => [lerp1(p[0], q[0], t), lerp1(p[1], q[1], t)];
+
+    // Maps a mask-space point that lies inside the mouthL/mouthR/jawL/jawR
+    // quad to its face-space equivalent, via bilinear interpolation across
+    // that quad's four corners (already-computed positions in both spaces).
+    // Used only for the zipper's 4 corners — see ZIPPER_POINTS above.
+    function quadLerp(maskX, maskY, quadMask, quadFace) {
+      const v = (maskY - quadMask.topL[1]) / (quadMask.botL[1] - quadMask.topL[1]);
+      const leftMaskX = lerp1(quadMask.topL[0], quadMask.botL[0], v);
+      const rightMaskX = lerp1(quadMask.topR[0], quadMask.botR[0], v);
+      const u = (maskX - leftMaskX) / (rightMaskX - leftMaskX);
+      const leftFace = lerpPt(quadFace.topL, quadFace.botL, v);
+      const rightFace = lerpPt(quadFace.topR, quadFace.botR, v);
+      return lerpPt(leftFace, rightFace, u);
+    }
+
+    function drawWarpedTriangle(targetCtx, img, src, dst) {
+      const [x0, y0] = src[0], [x1, y1] = src[1], [x2, y2] = src[2];
+      const [X0, Y0] = dst[0], [X1, Y1] = dst[1], [X2, Y2] = dst[2];
+
+      const denom = x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1);
+      if (Math.abs(denom) < 1e-6) return; // degenerate triangle, skip
+
+      const a = (X0 * (y1 - y2) + X1 * (y2 - y0) + X2 * (y0 - y1)) / denom;
+      const b = (Y0 * (y1 - y2) + Y1 * (y2 - y0) + Y2 * (y0 - y1)) / denom;
+      const c = (X0 * (x2 - x1) + X1 * (x0 - x2) + X2 * (x1 - x0)) / denom;
+      const d = (Y0 * (x2 - x1) + Y1 * (x0 - x2) + Y2 * (x1 - x0)) / denom;
+      const e = (X0 * (x1*y2 - x2*y1) + X1 * (x2*y0 - x0*y2) + X2 * (x0*y1 - x1*y0)) / denom;
+      const f = (Y0 * (x1*y2 - x2*y1) + Y1 * (x2*y0 - x0*y2) + Y2 * (x0*y1 - x1*y0)) / denom;
+
+      targetCtx.save();
+      targetCtx.beginPath();
+      targetCtx.moveTo(X0, Y0);
+      targetCtx.lineTo(X1, Y1);
+      targetCtx.lineTo(X2, Y2);
+      targetCtx.closePath();
+      targetCtx.clip();
+      targetCtx.setTransform(a, b, c, d, e, f);
+      targetCtx.drawImage(img, 0, 0);
+      targetCtx.restore();
+    }
+
+    function drawMasked(targetCtx, targetCanvas, source, sourceW, sourceH, faces) {
+      targetCanvas.width = sourceW;
+      targetCanvas.height = sourceH;
+      targetCtx.setTransform(1, 0, 0, 1, 0, 0);
+      targetCtx.clearRect(0, 0, sourceW, sourceH);
+      targetCtx.drawImage(source, 0, 0, sourceW, sourceH);
+
+      for (const landmarks of faces) {
+        // Real landmark-driven points, in face-pixel space. Points without
+        // an `lm` field (the eye loop points) are filled in just below,
+        // derived from the stable corner landmarks instead.
+        const facePts = LANDMARK_POINTS.map(p =>
+          p.lm !== undefined ? [landmarks[p.lm].x * sourceW, landmarks[p.lm].y * sourceH] : null
+        );
+        const outerIdxL = LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterL');
+        const innerIdxL = LANDMARK_POINTS.findIndex(p => p.name === 'eyeInnerL');
+        const outerIdxR = LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterR');
+        const innerIdxR = LANDMARK_POINTS.findIndex(p => p.name === 'eyeInnerR');
+        for (const [side, outerIdx, innerIdx] of [['L', outerIdxL, innerIdxL], ['R', outerIdxR, innerIdxR]]) {
+          const outer = facePts[outerIdx], inner = facePts[innerIdx];
+          const dx = inner[0] - outer[0], dy = inner[1] - outer[1];
+          const eyeWidth = Math.hypot(dx, dy);
+          const uHatX = dx / eyeWidth, uHatY = dy / eyeWidth;
+          const vHatX = -uHatY, vHatY = uHatX;
+          const project = ([u, v]) => [
+            outer[0] + u * eyeWidth * uHatX + v * eyeWidth * vHatX,
+            outer[1] + u * eyeWidth * uHatY + v * eyeWidth * vHatY,
+          ];
+          const params = EYE_LOOP_PARAMS[side];
+          facePts[LANDMARK_POINTS.findIndex(p => p.name === `eye${side}_c`)] = project(params.center);
+          params.loop.forEach((uv, i) => {
+            facePts[LANDMARK_POINTS.findIndex(p => p.name === `eye${side}_${i}`)] = project(uv);
+          });
+        }
+
+        const eyeOuterL = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterL')];
+        const eyeOuterR = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'eyeOuterR')];
+        const chin      = facePts[LANDMARK_POINTS.findIndex(p => p.name === 'chin')];
+        const foreheadRefPt = [
+          landmarks[FOREHEAD_REF.lm].x * sourceW,
+          landmarks[FOREHEAD_REF.lm].y * sourceH,
+        ];
+
+        // Similarity transform (rotation + independent x/y scale), anchored
+        // at eyeOuterL, with the fixed hood-coverage margin and the user's
+        // manual fit correction both layered on top. Drives Layer 1 and the
+        // extrapolated boundary points used by Layer 2.
+        const dxEye = eyeOuterR[0] - eyeOuterL[0], dyEye = eyeOuterR[1] - eyeOuterL[1];
+        const theta = Math.atan2(dyEye, dxEye) + adjust.rotDeg * Math.PI / 180;
+        const scaleX = (Math.hypot(dxEye, dyEye) / MASK_EYE_DIST) * HOOD_MARGIN_X * adjust.scaleXMul;
+        const scaleY = (Math.hypot(chin[0]-foreheadRefPt[0], chin[1]-foreheadRefPt[1]) / MASK_FACE_HEIGHT) * HOOD_MARGIN_Y * adjust.scaleYMul;
+        const cos = Math.cos(theta), sin = Math.sin(theta);
+        const [anchorMx, anchorMy] = ALL_POINTS[ANCHOR_IDX].mask;
+        const anchorFx = eyeOuterL[0] + adjust.offsetX;
+        const anchorFy = eyeOuterL[1] + adjust.offsetY;
+
+        // Boundary points computed BEFORE the mask draw, since both layers
+        // need the full triangle set (facePts + boundaryPts).
+        const boundaryPts = BOUNDARY_POINTS.map(p => {
+          const dx = (p.mask[0] - anchorMx) * scaleX;
+          const dy = (p.mask[1] - anchorMy) * scaleY;
+          return [
+            anchorFx + dx * cos - dy * sin,
+            anchorFy + dx * sin + dy * cos,
+          ];
+        });
+        const allFacePts = [...facePts, ...boundaryPts];
+
+        // Hair-hiding halo: a blurred, oversized black silhouette drawn
+        // first (furthest back), so stray hair just past the mask's crisp
+        // edge fades into soft shadow instead of visibly sticking out —
+        // approximating how a real mask tucks hair underneath it.
+        if (hairTuckEnabled) {
+          targetCtx.save();
+          targetCtx.filter = `blur(${HAIR_HALO_BLUR}px)`;
+          targetCtx.globalAlpha = HAIR_HALO_OPACITY;
+          targetCtx.translate(anchorFx, anchorFy);
+          targetCtx.rotate(theta);
+          targetCtx.scale(scaleX * HAIR_HALO_MARGIN, scaleY * HAIR_HALO_MARGIN);
+          targetCtx.translate(-anchorMx, -anchorMy);
+          targetCtx.drawImage(getSilhouette(), 0, 0, MASK_W, MASK_H);
+          targetCtx.restore();
+        }
+
+        // Composite Layer 2 (precise mesh) and Layer 1 (whole-mask stretch)
+        // on a scratch canvas before touching the real one. This — rather
+        // than clipping Layer 1 with a path — is what actually guarantees
+        // no double-drawing: the hand-authored mesh triangles overlap each
+        // other in a few places (adjacent triangles sharing an edge can
+        // still overlap slightly), which breaks a path-based exclusion via
+        // the evenodd rule (double coverage cancels back to "not excluded").
+        // Pixel-based compositing has no such failure mode: Layer 2 paints
+        // first, fully opaque wherever it covers; Layer 1 is then drawn
+        // with 'destination-over', so it only shows through pixels Layer 2
+        // left untouched — regardless of how the mesh triangles overlap.
+        scratchCanvas.width = sourceW;
+        scratchCanvas.height = sourceH;
+        scratchCtx.setTransform(1, 0, 0, 1, 0, 0);
+        scratchCtx.clearRect(0, 0, sourceW, sourceH);
+
+        for (const [i0, i1, i2] of TRIANGLES) {
+          drawWarpedTriangle(
+            scratchCtx, maskImg,
+            [ALL_POINTS[i0].mask, ALL_POINTS[i1].mask, ALL_POINTS[i2].mask],
+            [allFacePts[i0], allFacePts[i1], allFacePts[i2]]
+          );
+        }
+
+        // Zipper drawn last, as its own dedicated quad (2 triangles), so it
+        // always renders as one coherent piece regardless of how the
+        // surrounding mouth/jaw mesh is triangulated — see ZIPPER_POINTS.
+        const quadMask = {
+          topL: ALL_POINTS[IDX['mouthL']].mask, topR: ALL_POINTS[IDX['mouthR']].mask,
+          botL: ALL_POINTS[IDX['jawL']].mask,   botR: ALL_POINTS[IDX['jawR']].mask,
+        };
+        const quadFace = {
+          topL: facePts[LANDMARK_POINTS.findIndex(p => p.name === 'mouthL')],
+          topR: facePts[LANDMARK_POINTS.findIndex(p => p.name === 'mouthR')],
+          botL: facePts[LANDMARK_POINTS.findIndex(p => p.name === 'jawL')],
+          botR: facePts[LANDMARK_POINTS.findIndex(p => p.name === 'jawR')],
+        };
+        const zFace = {};
+        for (const [key, [mx, my]] of Object.entries(ZIPPER_POINTS)) {
+          zFace[key] = quadLerp(mx, my, quadMask, quadFace);
+        }
+        drawWarpedTriangle(
+          scratchCtx, maskImg,
+          [ZIPPER_POINTS.topL, ZIPPER_POINTS.topR, ZIPPER_POINTS.bottomL],
+          [zFace.topL, zFace.topR, zFace.bottomL]
+        );
+        drawWarpedTriangle(
+          scratchCtx, maskImg,
+          [ZIPPER_POINTS.topR, ZIPPER_POINTS.bottomR, ZIPPER_POINTS.bottomL],
+          [zFace.topR, zFace.bottomR, zFace.bottomL]
+        );
+
+        scratchCtx.save();
+        scratchCtx.globalCompositeOperation = 'destination-over';
+        scratchCtx.translate(anchorFx, anchorFy);
+        scratchCtx.rotate(theta);
+        scratchCtx.scale(scaleX, scaleY);
+        scratchCtx.translate(-anchorMx, -anchorMy);
+        scratchCtx.drawImage(maskImg, 0, 0, MASK_W, MASK_H);
+        scratchCtx.restore();
+
+        targetCtx.drawImage(scratchCanvas, 0, 0);
+      }
+    }
+
+    // ---------- Still photo mode ----------
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 6,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    faceMesh.onResults((results) => {
+      if (mode !== 'photo') return; // ignore stray callbacks from live mode
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      const faces = results.multiFaceLandmarks || [];
+      lastPhoto = { source: currentImage, w: currentImage.naturalWidth, h: currentImage.naturalHeight, faces };
+      drawMasked(ctx, canvas, lastPhoto.source, lastPhoto.w, lastPhoto.h, faces);
+      statusEl.textContent = faces.length
+        ? `${faces.length} face${faces.length === 1 ? '' : 's'} masked`
+        : 'No faces detected — try a clearer, front-facing photo';
+      downloadBtn.disabled = faces.length === 0;
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      mode = 'photo';
+      statusEl.textContent = 'Detecting faces…';
+      downloadBtn.disabled = true;
+      const img = new Image();
+      img.onload = () => {
+        currentImage = img;
+        faceMesh.send({ image: img });
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'masked-photo.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+
+    // ---------- Live camera mode ----------
+    // A second FaceMesh instance so live tracking and still-photo detection
+    // never interfere with each other's in-flight results.
+    const liveFaceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+    });
+    liveFaceMesh.setOptions({
+      maxNumFaces: 4,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    liveFaceMesh.onResults((results) => {
+      const faces = results.multiFaceLandmarks || [];
+      drawMasked(liveCtx, liveCanvas, video, video.videoWidth, video.videoHeight, faces);
+      liveStatus.textContent = faces.length ? '' : 'Looking for a face…';
+    });
+
+    async function startLiveCamera() {
+      mode = 'live';
+      liveView.style.display = 'flex';
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode },
+          audio: false,
+        });
+      } catch (err) {
+        liveStatus.textContent = 'Camera access denied or unavailable.';
+        return;
+      }
+      video.srcObject = mediaStream;
+      await video.play();
+
+      if (mpCamera) mpCamera.stop();
+      mpCamera = new Camera(video, {
+        onFrame: async () => { await liveFaceMesh.send({ image: video }); },
+        width: 640,
+        height: 480,
+      });
+      mpCamera.start();
+    }
+
+    function stopLiveCamera() {
+      if (mpCamera) { mpCamera.stop(); mpCamera = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      liveView.style.display = 'none';
+      mode = 'idle';
+    }
+
+    liveCameraBtn.addEventListener('click', startLiveCamera);
+    closeLiveBtn.addEventListener('click', stopLiveCamera);
+
+    flipBtn.addEventListener('click', () => {
+      facingMode = facingMode === 'user' ? 'environment' : 'user';
+      startLiveCamera(); // restart the stream with the new facing mode
+    });
+
+    captureBtn.addEventListener('click', () => {
+      // Freeze the current live frame (already composited with the mask)
+      // into the main canvas, then drop back to the normal photo view so
+      // the existing Download button works on it unchanged.
+      canvas.width = liveCanvas.width;
+      canvas.height = liveCanvas.height;
+      ctx.drawImage(liveCanvas, 0, 0);
+      stopLiveCamera();
+      placeholder.style.display = 'none';
+      canvas.style.display = 'block';
+      statusEl.textContent = 'Captured — ready to download';
+      downloadBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>
